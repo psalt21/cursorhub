@@ -15,6 +15,74 @@ BACKUP_DIR = CONFIG_DIR / "backups"
 CURSOR_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "Cursor"
 CURSOR_WORKSPACE_STORAGE = CURSOR_SUPPORT_DIR / "User" / "workspaceStorage"
 CURSOR_GLOBAL_STORAGE = CURSOR_SUPPORT_DIR / "User" / "globalStorage"
+CURSOR_STORAGE_JSON = CURSOR_SUPPORT_DIR / "User" / "globalStorage" / "storage.json"
+
+DEFAULT_PROFILE = "__default__"  # sentinel for "no profile / use Cursor default"
+
+
+def list_cursor_profiles() -> list[dict[str, str]]:
+    """Return all Cursor profiles available on this machine.
+
+    Each entry: {"name": "Work", "id": "-20e14fb3"} (id is Cursor's internal location key).
+    Always includes a synthetic Default entry first.
+    """
+    profiles = [{"name": "Default", "id": DEFAULT_PROFILE}]
+    try:
+        if CURSOR_STORAGE_JSON.exists():
+            with open(CURSOR_STORAGE_JSON, "r") as f:
+                data = json.load(f)
+            for p in data.get("userDataProfiles", []):
+                name = p.get("name", "").strip()
+                loc  = p.get("location", "")
+                if name:
+                    profiles.append({"name": name, "id": loc})
+    except Exception:
+        pass
+    return profiles
+
+
+def set_project_profile(path: str, profile_name: str) -> dict[str, Any]:
+    """Set (or clear) the Cursor profile for a project. Returns updated config."""
+    config = load_config()
+    abs_path = str(Path(path).expanduser().resolve())
+    for lst in (config.get("projects", []), config.get("archived_projects", [])):
+        for p in lst:
+            if p["path"] == abs_path:
+                if profile_name and profile_name != DEFAULT_PROFILE:
+                    p["cursor_profile"] = profile_name
+                else:
+                    p.pop("cursor_profile", None)
+                save_config(config)
+                return config
+    return config
+
+
+def open_in_cursor(path: str, cursor_app: str = "") -> None:
+    """Open *path* in Cursor, respecting any profile configured for the project."""
+    import subprocess
+
+    config = load_config()
+    if not cursor_app:
+        cursor_app = config.get("cursor_app", _find_cursor_app())
+
+    abs_path = str(Path(path).expanduser().resolve())
+
+    # Find profile for this project
+    profile_name = ""
+    for lst in (config.get("projects", []), config.get("archived_projects", [])):
+        for p in lst:
+            if p["path"] == abs_path:
+                profile_name = p.get("cursor_profile", "")
+                break
+
+    cursor_bin = str(Path(cursor_app) / "Contents" / "MacOS" / "Cursor")
+    if Path(cursor_bin).exists() and profile_name:
+        subprocess.Popen([cursor_bin, "--profile", profile_name, abs_path])
+    elif profile_name:
+        subprocess.Popen(["open", "-a", cursor_app, "--args",
+                          "--profile", profile_name, abs_path])
+    else:
+        subprocess.Popen(["open", "-a", cursor_app, abs_path])
 
 def _find_cursor_app() -> str:
     """Auto-detect the Cursor app path."""

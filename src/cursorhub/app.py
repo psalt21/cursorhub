@@ -13,9 +13,12 @@ from cursorhub.config import (
     archive_project,
     auto_discover_projects,
     delete_project,
+    list_cursor_profiles,
     load_config,
+    open_in_cursor,
     remove_project,
     save_config,
+    set_project_profile,
     unarchive_project,
 )
 from cursorhub.prompts import PROMPTS_DIR
@@ -69,13 +72,25 @@ class CursorHubApp(rumps.App):
                 name = project["name"]
                 path = project["path"]
                 exists = Path(path).exists()
-                label = name if exists else f"{name}  (missing)"
+                profile = project.get("cursor_profile", "")
+                profile_badge = f"  [{profile}]" if profile else ""
+                label = (name if exists else f"{name}  (missing)") + profile_badge
 
                 sub = rumps.MenuItem(label)
 
                 open_item = rumps.MenuItem("Open in Cursor", callback=self._open_project)
                 open_item._project_path = path
                 sub.add(open_item)
+
+                sub.add(rumps.separator)
+
+                profile_item = rumps.MenuItem(
+                    f"Profile: {profile or 'Default'}  ▸ Change...",
+                    callback=self._change_profile
+                )
+                profile_item._project_path = path
+                profile_item._project_name = name
+                sub.add(profile_item)
 
                 sub.add(rumps.separator)
 
@@ -192,20 +207,75 @@ class CursorHubApp(rumps.App):
         )
 
     def _open_project(self, sender):
-        """Open a project in Cursor."""
+        """Open a project in Cursor, using its assigned profile if set."""
         from cursorhub.analytics import log_event
         path = sender._project_path
-        cursor_app = self.config.get("cursor_app", "/Applications/Cursor.app")
         try:
-            subprocess.Popen(["open", "-a", cursor_app, path])
+            open_in_cursor(path)
             log_event("project_opened", project_path=path)
-            rumps.notification(
-                "CursorHub",
-                f"Opening {sender.title}",
-                f"{path}",
-            )
+
+            # Find profile name for the notification
+            profile = ""
+            for p in self.config.get("projects", []):
+                if p["path"] == path:
+                    profile = p.get("cursor_profile", "")
+                    break
+            detail = f"Profile: {profile}" if profile else path
+            rumps.notification("CursorHub", f"Opening {sender.title}", detail)
         except Exception as e:
             rumps.notification("CursorHub", "Error", str(e))
+
+    def _change_profile(self, sender):
+        """Show a profile picker for a project."""
+        import AppKit
+        path = sender._project_path
+        name = sender._project_name
+
+        profiles = list_cursor_profiles()
+        if len(profiles) <= 1:
+            rumps.notification(
+                "CursorHub",
+                "No extra profiles found",
+                "Create profiles in Cursor: File → Preferences → Profiles → New Profile",
+            )
+            return
+
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_(f"Cursor Profile for \"{name}\"")
+        alert.setInformativeText_(
+            "Choose which Cursor profile to use when opening this project.\n\n"
+            "Work and Personal profiles keep separate billing, extensions, and settings.\n\n"
+            "Create profiles in Cursor: File → Preferences → Profiles → New Profile"
+        )
+
+        popup = AppKit.NSPopUpButton.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 280, 26)
+        )
+        for p in profiles:
+            popup.addItemWithTitle_(p["name"])
+
+        # Pre-select the current profile
+        current = ""
+        for proj in self.config.get("projects", []):
+            if proj["path"] == path:
+                current = proj.get("cursor_profile", "")
+                break
+        for i, p in enumerate(profiles):
+            if p["name"] == current or (not current and p["id"] == "__default__"):
+                popup.selectItemAtIndex_(i)
+                break
+
+        alert.setAccessoryView_(popup)
+        alert.addButtonWithTitle_("Save")
+        alert.addButtonWithTitle_("Cancel")
+
+        if alert.runModal() == AppKit.NSAlertFirstButtonReturn:
+            selected = profiles[popup.indexOfSelectedItem()]
+            new_profile = "" if selected["id"] == "__default__" else selected["name"]
+            self.config = set_project_profile(path, new_profile)
+            self._build_menu()
+            label = selected["name"] if new_profile else "Default"
+            rumps.notification("CursorHub", f"Profile updated", f"{name} → {label}")
 
     def _archive_project(self, sender):
         """Move a project to the archive."""

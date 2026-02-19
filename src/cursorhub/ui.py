@@ -45,7 +45,7 @@ MODE_CLONE = 1
 MODE_BLANK = 2
 
 WIN_WIDTH = 720
-WIN_HEIGHT = 560
+WIN_HEIGHT = 600
 
 _edit_menu_installed = False
 
@@ -465,7 +465,7 @@ class NewProjectWindowController(NSObject):
 
     def _build_bottom_bar(self, parent):
         bw = WIN_WIDTH - 40
-        y = 100
+        y = 140
 
         # Project Name
         name_lbl = AppKit.NSTextField.labelWithString_("Project Name:")
@@ -509,8 +509,36 @@ class NewProjectWindowController(NSObject):
         choose_btn.setAutoresizingMask_(AppKit.NSViewMinXMargin)
         parent.addSubview_(choose_btn)
 
+        # Cursor Profile
+        y -= 34
+        prof_lbl = AppKit.NSTextField.labelWithString_("Cursor Profile:")
+        prof_lbl.setFrame_(NSMakeRect(20, y, 100, 20))
+        prof_lbl.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+        parent.addSubview_(prof_lbl)
+
+        prof_popup = AppKit.NSPopUpButton.alloc().initWithFrame_(
+            NSMakeRect(130, y - 2, 260, 26)
+        )
+        from cursorhub.config import list_cursor_profiles
+        self._cursor_profiles = list_cursor_profiles()
+        for p in self._cursor_profiles:
+            prof_popup.addItemWithTitle_(p["name"])
+        self._selected_profile = ""
+        prof_popup.setTarget_(self)
+        prof_popup.setAction_(objc.selector(self.profileChanged_, signature=b"v@:@"))
+        parent.addSubview_(prof_popup)
+        self._profile_popup = prof_popup
+
+        hint = AppKit.NSTextField.labelWithString_(
+            "Work or Personal profile keeps billing and extensions separate."
+        )
+        hint.setFrame_(NSMakeRect(130, y - 18, bw - 110, 16))
+        hint.setFont_(AppKit.NSFont.systemFontOfSize_(10))
+        hint.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+        parent.addSubview_(hint)
+
         # --- Separator ---
-        y -= 20
+        y -= 30
         sep = AppKit.NSBox.alloc().initWithFrame_(NSMakeRect(20, y, bw, 1))
         sep.setBoxType_(AppKit.NSBoxSeparator)
         sep.setAutoresizingMask_(AppKit.NSViewWidthSizable)
@@ -625,6 +653,13 @@ class NewProjectWindowController(NSObject):
         if result == AppKit.NSModalResponseOK:
             url = panel.URLs()[0]
             self._location_field.setStringValue_(url.path())
+
+    @objc.typedSelector(b"v@:@")
+    def profileChanged_(self, sender):
+        idx = self._profile_popup.indexOfSelectedItem()
+        selected = self._cursor_profiles[idx]
+        from cursorhub.config import DEFAULT_PROFILE
+        self._selected_profile = "" if selected["id"] == DEFAULT_PROFILE else selected["name"]
 
     @objc.typedSelector(b"v@:@")
     def cancel_(self, sender):
@@ -887,7 +922,9 @@ class NewProjectWindowController(NSObject):
     def _finish_creation(self, project_name, project_path, message,
                          created_via="", prompt_filename="", prompt_variables=None):
         """Register project, open in Cursor, notify, close window."""
-        from cursorhub.config import add_project, load_config
+        from cursorhub.config import (
+            add_project, load_config, open_in_cursor, set_project_profile
+        )
         from cursorhub.analytics import log_event
 
         display_name = project_name.replace("-", " ").replace("_", " ").title()
@@ -896,14 +933,19 @@ class NewProjectWindowController(NSObject):
                     prompt_filename=prompt_filename,
                     prompt_variables=prompt_variables)
 
+        # Apply selected profile if any
+        profile = getattr(self, "_selected_profile", "")
+        if profile:
+            set_project_profile(project_path, profile)
+
         log_event("project_created", prompt_filename=prompt_filename or None,
                   project_path=project_path, method=created_via,
                   project_name=display_name)
 
-        # Open in Cursor
+        # Open in Cursor (profile-aware)
         config = load_config()
         cursor_app = config.get("cursor_app", "/Applications/Cursor.app")
-        subprocess.Popen(["open", "-a", cursor_app, project_path])
+        open_in_cursor(project_path)
 
         # Auto-paste prompt into Cursor's agent chat if a prompt was applied
         if prompt_filename:
