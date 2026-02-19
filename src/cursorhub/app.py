@@ -18,6 +18,7 @@ from cursorhub.config import (
     open_in_cursor,
     remove_project,
     save_config,
+    set_project_ports,
     set_project_profile,
     unarchive_project,
 )
@@ -91,6 +92,26 @@ class CursorHubApp(rumps.App):
                 profile_item._project_path = path
                 profile_item._project_name = name
                 sub.add(profile_item)
+
+                # Ports
+                ports = project.get("ports", {})
+                if ports:
+                    port_summary = "  ".join(
+                        f"{k.replace('_port','').title()}:{v}"
+                        for k, v in sorted(ports.items())
+                    )
+                    ports_item = rumps.MenuItem(
+                        f"Ports: {port_summary}  ▸ Edit...",
+                        callback=self._edit_ports
+                    )
+                else:
+                    ports_item = rumps.MenuItem(
+                        "Ports: none  ▸ Add...",
+                        callback=self._edit_ports
+                    )
+                ports_item._project_path = path
+                ports_item._project_name = name
+                sub.add(ports_item)
 
                 sub.add(rumps.separator)
 
@@ -600,6 +621,78 @@ class CursorHubApp(rumps.App):
 
         rumps.notification("CursorHub", "Syncing prompts...", "Pulling from shared library.")
         threading.Thread(target=_do_sync, daemon=True).start()
+
+    def _edit_ports(self, sender):
+        """Show a port editor for a project."""
+        import AppKit
+        from cursorhub.config import get_all_allocated_ports, PORT_RANGES
+
+        path = sender._project_path
+        name = sender._project_name
+
+        # Find current ports
+        current_ports = {}
+        for p in self.config.get("projects", []):
+            if p["path"] == path:
+                current_ports = dict(p.get("ports", {}))
+                break
+
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_(f"Ports for \"{name}\"")
+        alert.setInformativeText_(
+            "Each service gets a unique port across all your projects.\n"
+            "Leave a field blank to remove that port assignment.\n"
+            "Format: service_name = port  (e.g. frontend_port = 3001)"
+        )
+        alert.addButtonWithTitle_("Save")
+        alert.addButtonWithTitle_("Cancel")
+
+        # Build editable text area with current assignments
+        tv = AppKit.NSTextView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 320, 140)
+        )
+        tv.setEditable_(True)
+        tv.setRichText_(False)
+        tv.setFont_(AppKit.NSFont.monospacedSystemFontOfSize_weight_(12, 0.0))
+
+        used = get_all_allocated_ports() - set(current_ports.values())
+        if current_ports:
+            content = "\n".join(f"{k} = {v}" for k, v in sorted(current_ports.items()))
+        else:
+            # Show hints for common port vars
+            content = "# Add ports like:\n# frontend_port = 3000\n# backend_port = 8000"
+        tv.setString_(content)
+
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 320, 140))
+        scroll.setDocumentView_(tv)
+        scroll.setHasVerticalScroller_(True)
+        alert.setAccessoryView_(scroll)
+
+        # Show all ports in use by other projects for reference
+        if used:
+            others = sorted(used)[:8]
+            note = f"Ports in use by other projects: {', '.join(str(p) for p in others)}"
+            alert.setInformativeText_(alert.informativeText() + f"\n\n{note}")
+
+        if alert.runModal() != AppKit.NSAlertFirstButtonReturn:
+            return
+
+        # Parse the edited content
+        new_ports = {}
+        for line in tv.string().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip()
+                if key and val.isdigit():
+                    new_ports[key] = int(val)
+
+        self.config = set_project_ports(path, new_ports, merge=False)
+        self._build_menu()
+        rumps.notification("CursorHub", "Ports updated", f"{name}: {len(new_ports)} port(s) saved.")
 
     def _add_project(self, _):
         """Add a project via folder picker dialog."""

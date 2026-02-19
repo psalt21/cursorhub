@@ -710,25 +710,42 @@ class NewProjectWindowController(NSObject):
                 self._show_alert("Could not read prompt content.")
                 return
 
-            var_names = parse_variables(body)
-            variables = None
+            all_vars = parse_variables(body)
+            variables = {}
 
-            if var_names:
-                # Show fill-in dialog for template variables
-                variables = self._ask_for_variables(var_names)
-                if variables is None:
-                    # User cancelled
+            from cursorhub.config import allocate_ports, is_port_variable, set_project_ports
+
+            # Split port vars (auto-assigned) from regular vars (user fills in)
+            port_vars = [v for v in all_vars if is_port_variable(v)]
+            user_vars = [v for v in all_vars if not is_port_variable(v)]
+
+            # Auto-assign ports
+            if port_vars:
+                port_assignments = allocate_ports(port_vars)
+                variables.update({k: str(v) for k, v in port_assignments.items()})
+
+            # Ask user for regular vars
+            if user_vars:
+                user_values = self._ask_for_variables(user_vars, port_preview=port_assignments if port_vars else {})
+                if user_values is None:
                     return
+                variables.update(user_values)
 
             Path(project_path).mkdir(parents=True, exist_ok=True)
 
             # Apply the prompt as a Cursor rule (with variable substitution)
             prompt_content = apply_prompt_to_project(
-                prompt["filename"], project_path, variables=variables
+                prompt["filename"], project_path, variables=variables if variables else None
             )
 
             # Copy to clipboard
             subprocess.run(["pbcopy"], input=prompt_content.encode(), check=True)
+
+            # Store port assignments in project config after creation
+            if port_vars:
+                self._pending_port_assignments = {k: int(v) for k, v in variables.items() if is_port_variable(k)}
+            else:
+                self._pending_port_assignments = {}
 
             self._finish_creation(
                 project_name, project_path,
@@ -740,9 +757,11 @@ class NewProjectWindowController(NSObject):
         except Exception as e:
             self._show_alert(f"Error creating project: {e}")
 
-    def _ask_for_variables(self, var_names):
+    def _ask_for_variables(self, var_names, port_preview=None):
         """Show a modal dialog asking the user to fill in template variable values.
 
+        port_preview: dict of {port_var: port_number} already assigned — shown
+        as read-only info above the input fields.
         Returns a dict of {var_name: value} or None if cancelled.
         """
         alert = AppKit.NSAlert.alloc().init()
@@ -754,22 +773,44 @@ class NewProjectWindowController(NSObject):
         alert.addButtonWithTitle_("Create Project")
         alert.addButtonWithTitle_("Cancel")
 
-        # Build a container view with labeled fields
         field_height = 28
         label_height = 16
         row_height = field_height + label_height + 8
-        total_height = len(var_names) * row_height + 4
         container_width = 350
+
+        # Port preview rows at the top
+        port_rows_height = 0
+        if port_preview:
+            port_rows_height = len(port_preview) * 20 + 20
+
+        total_height = len(var_names) * row_height + 4 + port_rows_height
 
         container = AppKit.NSView.alloc().initWithFrame_(
             NSMakeRect(0, 0, container_width, total_height)
         )
 
+        # Render port preview (read-only)
+        if port_preview:
+            py = total_height - 18
+            header = AppKit.NSTextField.labelWithString_("Auto-assigned ports:")
+            header.setFrame_(NSMakeRect(0, py, container_width, 16))
+            header.setFont_(AppKit.NSFont.boldSystemFontOfSize_(11))
+            container.addSubview_(header)
+            py -= 20
+            for pvar, pnum in port_preview.items():
+                row_lbl = AppKit.NSTextField.labelWithString_(
+                    f"  {pvar.replace('_port','').replace('_',' ').title()}: {pnum}"
+                )
+                row_lbl.setFrame_(NSMakeRect(0, py, container_width, 16))
+                row_lbl.setFont_(AppKit.NSFont.monospacedSystemFontOfSize_weight_(11, 0.0))
+                row_lbl.setTextColor_(AppKit.NSColor.systemGreenColor())
+                container.addSubview_(row_lbl)
+                py -= 18
+
         fields = {}
         for i, var in enumerate(var_names):
-            y = total_height - (i + 1) * row_height + 4
+            y = total_height - port_rows_height - (i + 1) * row_height + 4
 
-            # Label
             label = AppKit.NSTextField.labelWithString_(
                 var.replace("_", " ").title() + ":"
             )
@@ -778,7 +819,6 @@ class NewProjectWindowController(NSObject):
             label.setTextColor_(AppKit.NSColor.secondaryLabelColor())
             container.addSubview_(label)
 
-            # Text field
             field = AppKit.NSTextField.alloc().initWithFrame_(
                 NSMakeRect(0, y, container_width, field_height)
             )
@@ -788,7 +828,6 @@ class NewProjectWindowController(NSObject):
 
         alert.setAccessoryView_(container)
 
-        # Focus first field
         if var_names:
             alert.window().setInitialFirstResponder_(fields[var_names[0]])
 
@@ -796,7 +835,6 @@ class NewProjectWindowController(NSObject):
         if result != AppKit.NSAlertFirstButtonReturn:
             return None
 
-        # Collect values
         values = {}
         for var, field in fields.items():
             val = field.stringValue().strip()
@@ -874,22 +912,36 @@ class NewProjectWindowController(NSObject):
             prompt = self._clone_prompts_list[prompt_list_idx]
             prompt_filename = prompt["filename"]
             try:
+                from cursorhub.config import allocate_ports, is_port_variable, set_project_ports
                 body = get_prompt_body(prompt_filename)
-                var_names = parse_variables(body) if body else []
-                if var_names:
-                    prompt_variables = self._ask_for_variables(var_names)
-                    if prompt_variables is None:
-                        # User cancelled variable dialog — still finish without prompt
+                all_vars = parse_variables(body) if body else []
+
+                port_vars = [v for v in all_vars if is_port_variable(v)]
+                user_vars = [v for v in all_vars if not is_port_variable(v)]
+
+                port_assignments = allocate_ports(port_vars) if port_vars else {}
+                prompt_variables = {k: str(v) for k, v in port_assignments.items()}
+
+                if user_vars:
+                    user_values = self._ask_for_variables(user_vars, port_preview=port_assignments)
+                    if user_values is None:
                         prompt_filename = ""
+                    else:
+                        prompt_variables.update(user_values)
 
                 if prompt_filename:
                     prompt_content = apply_prompt_to_project(
-                        prompt_filename, info["path"], variables=prompt_variables
+                        prompt_filename, info["path"], variables=prompt_variables or None
                     )
                     subprocess.run(["pbcopy"], input=prompt_content.encode(), check=True)
+                    self._pending_port_assignments = {k: int(v) for k, v in prompt_variables.items() if is_port_variable(k)}
+                    port_note = ""
+                    if port_assignments:
+                        port_note = "  Ports: " + ", ".join(f"{k.replace('_port','').title()}={v}" for k, v in port_assignments.items())
                     message = (
                         "Repository cloned and starter prompt applied!\n"
                         "Prompt copied to clipboard — paste into your first chat."
+                        + ("\n" + port_note if port_note else "")
                     )
             except Exception as e:
                 message = f"Cloned successfully, but prompt failed: {e}"
@@ -937,6 +989,12 @@ class NewProjectWindowController(NSObject):
         profile = getattr(self, "_selected_profile", "")
         if profile:
             set_project_profile(project_path, profile)
+
+        # Save auto-assigned ports
+        pending_ports = getattr(self, "_pending_port_assignments", {})
+        if pending_ports:
+            set_project_ports(project_path, pending_ports)
+            self._pending_port_assignments = {}
 
         log_event("project_created", prompt_filename=prompt_filename or None,
                   project_path=project_path, method=created_via,

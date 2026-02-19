@@ -19,6 +19,86 @@ CURSOR_STORAGE_JSON = CURSOR_SUPPORT_DIR / "User" / "globalStorage" / "storage.j
 
 DEFAULT_PROFILE = "__default__"  # sentinel for "no profile / use Cursor default"
 
+# ---------------------------------------------------------------------------
+# Port registry
+# ---------------------------------------------------------------------------
+
+# Starting port for each variable-name prefix (ranges are 100 wide)
+PORT_RANGES: dict[str, int] = {
+    "frontend": 3000,
+    "client":   3100,
+    "web":      3200,
+    "backend":  8000,
+    "api":      8100,
+    "server":   8200,
+    "worker":   9000,
+    "queue":    9100,
+    "job":      9200,
+    "other":    4000,   # fallback for unrecognised prefixes
+}
+
+
+def _port_range_for(var_name: str) -> int:
+    """Return the base port for a port variable name like 'frontend_port'."""
+    prefix = var_name.replace("_port", "").split("_")[0].lower()
+    return PORT_RANGES.get(prefix, PORT_RANGES["other"])
+
+
+def get_all_allocated_ports() -> set[int]:
+    """Return every port already assigned to any project (active or archived)."""
+    config = load_config()
+    used: set[int] = set()
+    for lst in (config.get("projects", []), config.get("archived_projects", [])):
+        for project in lst:
+            for port in project.get("ports", {}).values():
+                if isinstance(port, int):
+                    used.add(port)
+    return used
+
+
+def allocate_ports(port_var_names: list[str]) -> dict[str, int]:
+    """Assign a unique port to each variable name (e.g. 'frontend_port').
+
+    Ports are guaranteed not to conflict with any existing project.
+    """
+    used = get_all_allocated_ports()
+    assignments: dict[str, int] = {}
+    for var in port_var_names:
+        base = _port_range_for(var)
+        port = base
+        while port in used or port in assignments.values():
+            port += 1
+        assignments[var] = port
+        used.add(port)
+    return assignments
+
+
+def set_project_ports(path: str, ports: dict[str, int], merge: bool = True) -> dict[str, Any]:
+    """Store port assignments for a project.
+
+    If *merge* is True (default), merges with existing ports.
+    If *merge* is False, replaces all ports.
+    """
+    config = load_config()
+    abs_path = str(Path(path).expanduser().resolve())
+    for lst in (config.get("projects", []), config.get("archived_projects", [])):
+        for p in lst:
+            if p["path"] == abs_path:
+                if merge:
+                    existing = p.get("ports", {})
+                    existing.update(ports)
+                    p["ports"] = existing
+                else:
+                    p["ports"] = dict(ports)
+                save_config(config)
+                return config
+    return config
+
+
+def is_port_variable(var_name: str) -> bool:
+    """Return True if *var_name* should be treated as an auto-assigned port."""
+    return var_name.endswith("_port") or var_name == "port"
+
 
 def list_cursor_profiles() -> list[dict[str, str]]:
     """Return all Cursor profiles available on this machine.
